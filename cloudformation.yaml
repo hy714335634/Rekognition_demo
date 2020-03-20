@@ -2,13 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 
 Description: Build a serverless smart home album with AWS Rekognition service
 
-Parameters:
-  Bucketname:
-    Description: S3 Bucket name
-    Type: String
-  Queuename:
-    Type: String
-    Description: SQS Queue name
 
 Resources:
   apiGateway:
@@ -115,7 +108,6 @@ Resources:
       DelaySeconds: 0
       MaximumMessageSize: 262144
       MessageRetentionPeriod: 864000
-      QueueName: !Ref Queuename
       ReceiveMessageWaitTimeSeconds: 0
       VisibilityTimeout: 90
 
