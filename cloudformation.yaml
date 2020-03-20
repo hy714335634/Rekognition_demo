@@ -1,0 +1,414 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Build a serverless smart home album with AWS Rekognition service
+
+Parameters:
+  Bucketname:
+    Description: S3 Bucket name
+    Type: String
+  Queuename:
+    Type: String
+    Description: SQS Queue name
+
+Resources:
+  apiGateway:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Name: !Ref AWS::StackName
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  apiGatewayResourcePath:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref apiGateway
+      ParentId: !GetAtt 
+        - apiGateway
+        - RootResourceId
+      PathPart: img
+
+  apiGatewayPostMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      AuthorizationType: "NONE"
+      HttpMethod: "POST"
+      MethodResponses:
+          - StatusCode: 200
+            ResponseModels: { "application/json": "Empty" }
+      Integration:
+        IntegrationHttpMethod: "POST"
+        Type: "AWS"
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations"
+          - lambdaArn: !GetAtt [ inferencemulti, Arn ]
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates: {"application/json": ""}
+      ResourceId: !Ref apiGatewayResourcePath
+      RestApiId: !Ref "apiGateway"
+    DependsOn: "LambdaPermission"
+
+  apiGatewayDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn:
+      - "apiGatewayPostMethod"
+    Properties:
+      RestApiId: !Ref "apiGateway"
+      StageName: "beta"
+
+  LambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt [ inferencemulti, Arn ]
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - QueuePolicy
+    Properties:
+      NotificationConfiguration:
+        QueueConfigurations:
+        - Event: 's3:ObjectCreated:*'
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .jpg
+          Queue: !GetAtt MyQueue.Arn
+        - Event: 's3:ObjectCreated:*'
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .jpeg
+          Queue: !GetAtt MyQueue.Arn
+        - Event: 's3:ObjectCreated:*'
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .png
+          Queue: !GetAtt MyQueue.Arn
+
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - SQS:SendMessage
+            Resource: !GetAtt MyQueue.Arn
+      Queues:
+        - !Ref MyQueue
+
+  MyQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      DelaySeconds: 0
+      MaximumMessageSize: 262144
+      MessageRetentionPeriod: 864000
+      QueueName: !Ref Queuename
+      ReceiveMessageWaitTimeSeconds: 0
+      VisibilityTimeout: 90
+
+  LambdaRoleForadd2collectionn:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: LambdaRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "sqs:ReceiveMessage"
+                  - "sqs:DeleteMessage"
+                  - "sqs:GetQueueAttributes"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "rekognition:*"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:ListObject"
+                Resource: !Join 
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - !Ref S3Bucket
+                    - /*
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+
+  LambdaRoleForinferencemulti:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: LambdaRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "rekognition:*"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+
+  MyLayer:
+    Type: "AWS::Lambda::LayerVersion"
+    Properties:
+      CompatibleRuntimes: 
+        - python3.6
+        - python3.7
+        - python3.8
+      Content: 
+        S3Bucket: tokyo-data
+        S3Key: python-pillow.zip
+      Description: pillow-7.0.0
+      LayerName: python-pillow
+      LicenseInfo: MIT
+
+  inferencemulti:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt [ LambdaRoleForinferencemulti, Arn ]
+      Layers: 
+        - !Ref MyLayer
+      Code:
+        ZipFile:
+          !Sub
+            - |-
+              import json
+              import boto3
+              import base64
+              import io
+              import uuid
+              from PIL import Image
+
+              def detect_faces(client,img):
+                  with open(img, 'rb') as image:
+                      response = client.detect_faces(Image={'Bytes': image.read()},Attributes=['ALL'])
+                      print('Detected faces for ' + img)    
+                      return response['FaceDetails']
+
+              def crop_img(img_source,faceslist,img_type):
+                  img_list = []
+                  im = Image.open(img_source)
+                  # 图片的宽度和高度
+                  img_size = im.size
+                  print("图片宽度和高度分别是{}".format(img_size))
+                  for i in range(len(faceslist)):
+                      try:
+                          detail = {'index':i,'boundingbox':faceslist[i]['BoundingBox'],'AgeRange':faceslist[i]['AgeRange'],'Gender':faceslist[i]['Gender']}
+                          detail['filename'] = str(uuid.uuid1()) + '.' + str(img_type)
+                          x = detail['boundingbox']['Left'] * img_size[0]
+                          y = detail['boundingbox']['Top'] * img_size[1]
+                          w = detail['boundingbox']['Width'] * img_size[0]
+                          h = detail['boundingbox']['Height'] * img_size[1]
+                          print("index:",i," boundingbox:", x,y,w,h)
+                          region = im.crop((x, y, x+w, y+h))
+                          img_path = '/tmp/' + detail['filename'] 
+                          region.save(img_path)
+                          img_list.append(detail)
+                      except Exception as e:
+                          print(e)
+                  return img_list
+
+              def decodepic(base64_str,filetype,uuid):
+                  uid_name = str(uuid) + '.' + filetype
+                  pic_name = '/tmp/' + uid_name
+                  imgdata = base64.b64decode(base64_str)
+                  file = open(pic_name,'wb')
+                  file.write(imgdata)
+                  file.close()
+                  return pic_name
+
+              def search_faces(client,imglist,collectionId,threshold):
+                  for i in range(len(imglist)):
+                      imglist[i]['Similarity'] = 0
+                      imglist[i]['Tag'] = ""
+                      with open('/tmp/' + imglist[i]['filename'], 'rb') as image:
+                          response=client.search_faces_by_image(CollectionId=collectionId,
+                                                          Image={'Bytes': image.read()},
+                                                          FaceMatchThreshold=threshold,
+                                                          MaxFaces=1)
+                          faceMatches = response['FaceMatches']
+                          print ('Matching faces')
+                          if faceMatches:
+                              for match in faceMatches:
+                                  print ('FaceId:' + match['Face']['FaceId'])
+                                  print ('Face Tag:' + match['Face']['ExternalImageId'])
+                                  print ('Similarity: ' + "{:.2f}".format(match['Similarity']) + "%")
+                                  print
+                                  if match['Similarity'] > imglist[i]['Similarity']:
+                                      imglist[i]['Similarity'] = match['Similarity']
+                                      imglist[i]['Tag'] = match['Face']['ExternalImageId']
+                  return imglist
+                          
+              def lambda_handler(event, context):
+                  collectionId = event['collection_id']
+                  threshold = event['threshold']
+                  img = decodepic(event['img'],event['img_type'],str(uuid.uuid1()))
+                  client = boto3.client('rekognition')
+                  faceslist = detect_faces(client,img)
+                  print(faceslist)
+                  imglist = crop_img(img,faceslist,event['img_type'])
+                  res = search_faces(client,imglist,collectionId,threshold)
+                  print(res)
+                  return json.dumps(res)
+            - {}
+      Runtime: "python3.7"
+      Timeout: "30"
+
+  add2collectionn:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt [ LambdaRoleForadd2collectionn, Arn ]
+      Layers: 
+        - !Ref MyLayer
+      Code:
+        ZipFile:
+          !Sub
+            - |-
+              import json
+              import boto3
+              from botocore.exceptions import ClientError
+              from urllib.parse import unquote_plus
+
+              def describe_collection(client,collection_id):
+
+                  print('Attempting to describe collection ' + collection_id)
+                  flag = 0
+                  try:
+                      response=client.describe_collection(CollectionId=collection_id)
+                      print("Collection Arn: "  + response['CollectionARN'])
+                      print("Face Count: "  + str(response['FaceCount']))
+                      print("Face Model Version: "  + response['FaceModelVersion'])
+                      print("Timestamp: "  + str(response['CreationTimestamp']))
+                      flag = 1
+                      
+                  except ClientError as e:
+                      if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                          print ('The collection ' + collection_id + ' was not found ')
+                      else:
+                          print ('Error other than Not Found occurred: ' + e.response['Error']['Message'])
+                      flag = 0
+                  finally:
+                      print('Done...')
+                      return flag
+
+              def create_collection(client,collection_id):
+                  #Create a collection
+                  print('Creating collection:' + collection_id)
+                  response=client.create_collection(CollectionId=collection_id)
+                  print('Collection ARN: ' + response['CollectionArn'])
+                  print('Status code: ' + str(response['StatusCode']))
+                  print('Done...')
+
+
+              def add_faces_to_collection(client,bucket,photo,collection_id,information):
+                  response=client.index_faces(CollectionId=collection_id,
+                                              Image={'S3Object':{'Bucket':bucket,'Name':photo}},
+                                              MaxFaces=1,
+                                              QualityFilter="AUTO",
+                                              ExternalImageId=information,
+                                              DetectionAttributes=['ALL'])
+
+                  print ('Results for ' + photo) 	
+                  print('Faces indexed:')						
+                  for faceRecord in response['FaceRecords']:
+                      print('  Face ID: ' + faceRecord['Face']['FaceId'])
+                      print('  Location: {}'.format(faceRecord['Face']['BoundingBox']))
+
+                  print('Faces not indexed:')
+                  for unindexedFace in response['UnindexedFaces']:
+                      print(' Location: {}'.format(unindexedFace['FaceDetail']['BoundingBox']))
+                      print(' Reasons:')
+                      for reason in unindexedFace['Reasons']:
+                          print('   ' + reason)
+                  return len(response['FaceRecords'])
+
+                  
+              def lambda_handler(event, context):
+                  print(event)
+                  info = json.loads(event['Records'][0]['body'])
+                  if 'Event' in info.keys() and info['Event'] == "s3:TestEvent":
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps("init finish")
+                      }
+                  eventName = str(info['Records'][0]['eventName']).split(':')[1]
+                  bucket = str(info['Records'][0]['s3']['bucket']['name'])
+                  object_key = str(info['Records'][0]['s3']['object']['key'])
+                  information = "default"
+                  collection_id = "default"
+                  client = boto3.client('rekognition')
+                  if '/' in object_key:
+                      collection_id = object_key.split('/')[-2]
+                      information = object_key.split('/')[-1].split('.')[0]
+                  else:
+                      information = object_key.split('.')[0]
+                  if not describe_collection(client,collection_id):
+                      create_collection(client,collection_id)
+                  try:
+                      
+                      indexed_faces_count = add_faces_to_collection(client,bucket, object_key, collection_id,information)
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps("Faces indexed count: " + str(indexed_faces_count))
+                      }
+                  except Exception as e:
+                      return {
+                          'statusCode': 403,
+                          'body': json.dumps(str(e))
+                      }
+            - {}
+      Runtime: "python3.7"
+      Timeout: "30"
+  
+  LambdaFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt MyQueue.Arn
+      FunctionName: !GetAtt add2collectionn.Arn
+
+
+Outputs:
+  apiGatewayInvokeURL:
+    Value: !Sub "https://${apiGateway}.execute-api.${AWS::Region}.amazonaws.com/beta/"
