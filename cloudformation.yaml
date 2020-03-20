@@ -1,6 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
 Description: Build a serverless smart home album with AWS Rekognition service
+Parameters:
+  TempBucketname:
+    Description: S3 Bucket name
+    Type: String
+  PackageName:
+    Type: String
+    Description: Package name
 
 
 Resources:
@@ -186,8 +193,8 @@ Resources:
         - python3.7
         - python3.8
       Content: 
-        S3Bucket: tokyo-data
-        S3Key: python-pillow.zip
+        S3Bucket: !Ref TempBucketname
+        S3Key: !Ref PackageName
       Description: pillow-7.0.0
       LayerName: python-pillow
       LicenseInfo: MIT
@@ -403,4 +410,4 @@ Resources:
 
 Outputs:
   apiGatewayInvokeURL:
-    Value: !Sub "https://${apiGateway}.execute-api.${AWS::Region}.amazonaws.com/beta/"
+    Value: !Sub "https://${apiGateway}.execute-api.${AWS::Region}.amazonaws.com/beta/img/"
